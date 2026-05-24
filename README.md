@@ -3,7 +3,7 @@
 # The Illusion of Reasoning
 ### Exposing Evasive Data Contamination in LLMs via Zero-CoT Truncation
 
-📄 **arXiv link coming soon**
+📄 [**Paper**](https://arxiv.org/abs/2605.21856)
 
 </div>
 
@@ -171,8 +171,19 @@ Fine-tuning code is intentionally not included — please follow the SFT + GRPO 
 
 ## Citation
 
-> A BibTeX entry will be added here once the paper is posted to arXiv.
+If you find our work useful, please consider citing:
 
+```bibtex
+@misc{lan2026illusionreasoningexposingevasive,
+      title={The Illusion of Reasoning: Exposing Evasive Data Contamination in LLMs via Zero-CoT Truncation}, 
+      author={Yifan Lan and Yuanpu Cao and Hanyu Wang and Lu Lin and Jinghui Chen},
+      year={2026},
+      eprint={2605.21856},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2605.21856}, 
+}
+```
 ## License
 
 This repository is released under the [MIT License](LICENSE).
