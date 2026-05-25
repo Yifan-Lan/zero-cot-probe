@@ -11,7 +11,7 @@
 
 ## TL;DR
 
-We propose the **Zero-CoT Probe (ZCP)**, a black-box method for detecting data contamination in LLMs — including *evasive* contamination via paraphrasing. ZCP truncates the chain-of-thought (CoT) and forces the model to emit the final answer directly, exposing memorized shortcut mappings that surface-level detectors miss. Contamination strength is quantified by **Contamination Confidence (C_cont)**, a Bayesian posterior in $[0.5, 1)$ calibrated from a frequentist significance test: a value near $0.5$ indicates no statistical evidence of contamination, while values approaching $1$ indicate increasingly definitive memorization. 
+We propose the **Zero-CoT Probe (ZCP)**, a black-box method for detecting data contamination in LLMs — including *evasive* contamination via paraphrasing. ZCP truncates the chain-of-thought (CoT) and forces the model to emit the final answer directly, exposing memorized shortcut mappings that surface-level detectors miss. Contamination strength is quantified by **Contamination Confidence ($\mathcal{C}_{cont}$)**, a Bayesian posterior in $[0.5, 1)$ calibrated from a frequentist significance test: a value near $0.5$ indicates no statistical evidence of contamination, while values approaching $1$ indicate increasingly definitive memorization. 
 
 <p align="center">
   <img src="assets/CoT_truncation_illustration.png" width="850" alt="Zero-CoT Probe illustration">
