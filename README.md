@@ -112,9 +112,10 @@ The reference data $\tilde{D}_{\text{eval}}$ is built via the **generator + 2-ju
 
 ```bash
 # Reference data D̃_eval (isomorphic numerical perturbation):
-# --mode {clean, paraphrased, original, both, mmlu, finance} selects the input/output schema.
+# --mode {paraphrased, original, both, clean} selects which fields the loader reads.
+# Use --mode clean for our shipped dataset_c.jsonl / dataset_u.jsonl files (works on both omnimath and multi_domain splits).
 python clean_numerical_dataset_multi_models.py \
-    --dataset-path <path/to/original_dataset.jsonl> \
+    --dataset-path dataset/omnimath/dataset_c/dataset_c.jsonl \
     --mode clean \
     --output-dir runs/reference_data \
     --api-key $OPENAI_API_KEY \

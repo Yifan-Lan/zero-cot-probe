@@ -1,38 +1,37 @@
 """
 Use the GPT API to perturb numerical values in a multi-domain dataset and recalculate
-solutions and answers. Supports MMLU-Pro categories (math, physics, chemistry, business)
-as well as generic local JSONL files.
+solutions and answers. Operates on local JSONL files spanning math, physics, chemistry,
+business, finance, and other quantitative domains.
 
-This script produces a "cleaned" reference dataset used by the ZCP method to compare
-against potentially contaminated data.
+This script produces the "cleaned" reference dataset (D̃_eval) used by the ZCP method
+to compare against potentially contaminated data, following the generator + 2-judge
+consensus pipeline described in paper Appendix B.
 
 Usage examples:
 
-# Clean an MMLU-Pro math subset
+# Build reference data from a paraphrased contamination split (default mode)
 python clean_numerical_dataset_multi_models.py \
-    --dataset-path <path/to/math/dataset_u.jsonl> \
-    --mode mmlu \
-    --category math \
+    --dataset-path <path/to/paraphrased_dataset.jsonl> \
+    --mode paraphrased \
     --output-dir <path/to/output_dir> \
-    --model o3-mini \
-    --verify-model-gemini gemini-2.5-flash \
-    --verify-model-gpt o4-mini \
-    --display \
+    --model o4-mini \
+    --verify-model-gemini gemini-2.0-flash-exp \
+    --verify-model-gpt gpt-4o-mini \
     --save-interval 10
+
+# Build reference data directly from our shipped datasets (omnimath dataset_c / dataset_u,
+# multi_domain dataset_c / dataset_u)
+python clean_numerical_dataset_multi_models.py \
+    --dataset-path <path/to/dataset_c.jsonl> \
+    --mode clean \
+    --output-dir <path/to/output_dir>
 
 # Resume from a previous run using a failed-indices file
 python clean_numerical_dataset_multi_models.py \
-    --dataset-path <path/to/dataset_u.jsonl> \
-    --mode mmlu \
-    --category physics \
+    --dataset-path <path/to/dataset_c.jsonl> \
+    --mode clean \
     --output-dir <path/to/output_dir> \
-    --model o3 \
-    --verify-model-gemini gemini-2.5-flash \
-    --verify-model-gpt o4-mini \
-    --save-interval 10 \
     --index-range <path/to/failed_indices.json>
-
-# Supported categories: math, physics, chemistry, business
 
 # Set API keys via environment variables before running:
 export OPENAI_API_KEY="YOUR_OPENAI_API_KEY"
@@ -42,15 +41,11 @@ export GEMINI_API_KEY="YOUR_GEMINI_API_KEY"
 import os
 import json
 import time
-import csv
-import random
-import re
 from typing import Dict, List, Optional
 from openai import OpenAI
 from tqdm import tqdm
 import argparse
 from google import genai
-from datasets import load_dataset
 
 class DatasetParaphraser:
     def __init__(self, api_key: str, model: str = "gpt-4o", output_dir: str = "./paraphrased_data", display: bool = False,
@@ -84,123 +79,40 @@ class DatasetParaphraser:
         else:
             self.gemini_client = None
             
+        # This system prompt matches paper Table 8 (Reference Data Generator).
         self.system_prompt = f"""You are a mathematical data generator specialized in creating diverse training samples. Your task is to create a new sample by paraphrasing and modifying the original problem while maintaining the same difficulty level and solution logic.
 
-**Strict Instructions:**
-
-1.  **Paraphrase and Modify Problem:**
-    * **MUST paraphrase**: Rephrase sentences, change wording, and adjust sentence structure to create a distinctly different version.
-    * **MUST change context**: Change variable names, object names, or scenarios (e.g., "apples" to "books", "Alice" to "Bob", "students in a class" to "workers in a factory").
+**1. Paraphrase & Modify Problem:**
+    * **Paraphrase**: Rephrase sentences, change wording, and adjust sentence structure to create a distinctly different version.
+    * **Change context**: Change variable names, object names, or scenarios (e.g., "apples" to "books", "Alice" to "Bob", "students in a class" to "workers in a factory").
     * **Change numerical values** with these constraints:
         - Keep the same ORDER OF MAGNITUDE (e.g., if original is 50, use 30-80, NOT 5 or 500).
         - Keep integers as integers, decimals as decimals with similar precision.
         - For multiple numbers in the problem, scale them proportionally when possible.
-        - **CRITICAL:** Aim to keep the final answer's ORDER OF MAGNITUDE similar to the original (e.g., if original answer is 42, target new answer around 20-80, NOT 4 or 400).
+        - **CRITICAL:** Aim to keep the final answer's ORDER OF MAGNITUDE similar to the original.
     * **CRITICAL:** Do NOT change the mathematical logic, problem type, or solution method. The core mathematical concept must remain identical.
     * **CRITICAL:** Maintain the same difficulty level - if the original requires specific techniques, the modified version must require the same techniques.
     * **CRITICAL:** Preserve ALL formatting, including LaTeX notation ($ signs, \\cdot, \\frac, \\begin, \\end, etc.), Asymptote code ([asy]...[/asy]), and markdown.
 
-2.  **Recalculate Solution:**
+**2. Recalculate Solution:**
     * Rewrite the "Solution" step-by-step using the paraphrased problem and modified numbers.
     * Follow the EXACT same logical reasoning and solution method as the original.
     * Apply the same mathematical techniques and problem-solving steps.
     * Preserve ALL LaTeX formatting and code blocks from the original.
     * Perform all necessary arithmetic correctly to reflect the changes.
 
-3.  **Update Answer:**
+**3. Update Answer:**
     * Calculate the final result based on your new solution.
-    * **Verify the answer is in the same ORDER OF MAGNITUDE as the original answer**.
-    * Output the new result in the "Answer" field using the SAME format as the original.
+    * **Verify the answer is in the same ORDER OF MAGNITUDE as the original answer.**
+    * Output the new result in the "Answer" field using the SAME format and length as the original.
     * Ensure the "Answer" matches the recalculated solution.
 
 **Output Format:**
-Reasoning: [Describe the changes made, e.g., "Changed 5 to 7, 10 to 14 (kept same order of magnitude), rephrased 'students in class' to 'workers in factory', changed character names from Alice/Bob to Emma/John. Original answer was 15, new answer is 21 (same order of magnitude)."]
+Reasoning: [Describe the changes made]
 New Problem: [Paraphrased problem with new numbers, context, and wording, preserving ALL formatting]
 New Solution: [Recalculated solution following the same logic, preserving ALL formatting]
 New Answer: [The new final result in same order of magnitude, preserving ALL formatting]
         """
-
-        self.system_prompt_finance = f"""You are a financial problem generator. Your task is to take an existing financial calculation problem, modify the numerical values, and optionally paraphrase the question.
-
-**Strict Instructions:**
-
-1.  **Modify Problem:**
-    *   **Change numerical values** with these constraints:
-        - Keep the same ORDER OF MAGNITUDE (e.g., if original is 50, use 30-80, NOT 5 or 500).
-        - Keep integers as integers, decimals as decimals with similar precision.
-        - **CRITICAL:** Aim to keep the final answer's ORDER OF MAGNITUDE similar to the original (e.g., if original answer is 42, target new answer around 20-80, NOT 4 or 400).
-    *   **CRITICAL:** Do NOT change the mathematical logic, problem type, or financial principles. 
-    *   **CRITICAL:** Maintain the same difficulty level - if the original requires specific techniques, the modified version must require the same techniques.
-    *   **CRITICAL:** Ensure the number changes *WILL* affect the final answer.
-    *   **Paraphrasing (Optional):** You may rephrase the question text for clarity or variety (wording, context and etc.), as long as the core financial concepts and logic remain EXACTLY the same.
-
-2.  **Generate Solution:**
-    *   Since the original problem might not have a solution provided, you must derive the correct step-by-step solution logic based on the financial principles involved.
-    *   Apply this logic to the **NEW** numbers.
-    *   Show all steps clearly.
-
-3.  **Calculate New Answer:**
-    *   Calculate the final result based on your new numbers and solution.
-    *   Output the new result in the "Answer" field.
-
-4.  **Formatting:**
-    *   Preserve ALL formatting, including LaTeX notation ($ signs, \\cdot, \\frac, \\begin, \\end, etc.), Asymptote code ([asy]...[/asy]), and markdown.
-
-**Output Format:**
-Reasoning: [List the number changes made and very briefly the logic used]
-New Problem: [The question text with NEW numbers]
-New Solution: [Step-by-step solution using the NEW numbers]
-Answer: [The final numerical answer]
-"""
-
-        self.system_prompt_mmlu = f"""You are a multi-domain data generator specialized in numerical problems across various subjects (mathematics, physics, chemistry, business, etc.). Your task is to take an existing open-ended question with a numerical answer, modify the numbers in the question, and recalculate the correct answer.
-
-**IMPORTANT - When to SKIP:**
-If ANY of these conditions apply, output ONLY the word "SKIP" and stop:
-- The problem contains NO numerical values that can be reasonably modified
-- The numerical values are constants (e.g., fundamental constants like π, e, speed of light)
-- Modifying the numbers would violate domain-specific laws (e.g., makes chemistry impossible, physics nonsensical)
-- The numbers are years, dates, or historical references that cannot be changed
-- The problem structure makes it impossible to maintain the same difficulty when changing numbers
-        
-**Strict Instructions (if NOT skipping):**
-
-1.  **Modify Question:**
-    *   **Change numerical values** with these constraints:
-        - Keep the same ORDER OF MAGNITUDE (e.g., if original is 50, use 30-80, NOT 5 or 500).
-        - Keep integers as integers, decimals as decimals with similar precision.
-        - Preserve units and their appropriateness (e.g., meters, seconds, moles, dollars).
-        - **CRITICAL:** Aim to keep the final answer's ORDER OF MAGNITUDE similar to the original.
-    *   **CRITICAL:** Do NOT change the problem type, domain-specific laws/principles, or core concepts.
-    *   **CRITICAL:** Maintain the same difficulty level and required knowledge.
-    *   **CRITICAL:** Ensure the number changes affect the final answer.
-    *   **CRITICAL:** For physics problems, ensure modified values still obey physical laws and constraints.
-    *   **CRITICAL:** For chemistry problems, keep stoichiometric ratios and chemical principles valid.
-    *   **CRITICAL:** For business problems, keep financial metrics and scenarios realistic.
-    *   **Paraphrasing (Optional):** You may rephrase the question text for clarity or variety (wording, context and etc.), as long as the domain-specific concepts remain EXACTLY the same.
-
-2.  **Generate Solution:**
-    *   Derive the correct step-by-step solution using the NEW numbers.
-    *   Show all steps clearly.
-    *   Perform all arithmetic correctly.
-
-3.  **Calculate New Answer:**
-    *   Calculate the final result based on your new numbers and solution.
-    *   Output the new result in similar format to the original answer, preserving any specific formatting (like units, LaTeX, etc.).
-
-4.  **Formatting:**
-    *   Preserve ALL formatting, including LaTeX notation ($ signs, \\cdot, \\frac, \\begin, \\end, etc.), scientific notation, chemical formulas, and markdown.
-    *   Maintain proper units and notation conventions for the specific domain.
-
-**Output Format:**
-If skipping: SKIP
-
-If proceeding:
-Reasoning: [List the number changes made and briefly the logic used]
-New Problem: [The open-ended question text with NEW numbers]
-New Solution: [Step-by-step solution using the NEW numbers]
-Answer: [The final answer]
-"""
         
         # Fallback: if 'both' mode has no separate prompt defined, reuse the single-sample prompt
         self.system_prompt_both = getattr(self, "system_prompt_both", self.system_prompt)
@@ -1120,326 +1032,31 @@ Reasoning: [Brief explanation of your verification]"""
 
         return bool(gemini_result)
 
-    def _is_numerical_text(self, text: str, threshold: float = 0.5) -> bool:
-        """
-        Check whether the proportion of numeric characters in text exceeds a threshold
-        
-        Args:
-            text: text to check
-            threshold: numeric character proportion threshold (default 0.5, i.e. 50%)
-            
-        Returns:
-            True if the proportion of numeric characters >= threshold
-        """
-        if not text or not isinstance(text, str):
-            return False
-        
-        # Remove spaces to count valid characters
-        text_no_space = text.replace(' ', '').replace('\n', '').replace('\t', '')
-        if len(text_no_space) == 0:
-            return False
-        
-        # Count digits, decimal points, commas, minus signs, and other numeric characters
-        numerical_chars = re.findall(r'[\d.,\-+/()%$]', text_no_space)
-        numerical_ratio = len(numerical_chars) / len(text_no_space)
-        
-        return numerical_ratio >= threshold
-
-    def _contains_modifiable_numbers(self, text: str) -> bool:
-        """
-        Check whether the text contains at least one modifiable numeric value
-        
-        Args:
-            text: text to check
-            
-        Returns:
-            True if the text contains at least one digit
-        """
-        if not text or not isinstance(text, str):
-            return False
-        
-        # Check for at least one digit
-        return bool(re.search(r'\d', text))
-
-    def _prepare_mmlu_dataset(self, dataset_name: str, category: str, output_dir: str, sample_size: int = 250) -> List[Dict]:
-        """
-        Prepare data from the MMLU-Pro dataset: filter for numeric answers and create two non-overlapping datasets
-        
-        Args:
-            dataset_name: dataset name, e.g. "TIGER-Lab/MMLU-Pro"
-            category: data category, e.g. "math", "physics", etc.
-            output_dir: output directory
-            sample_size: number of samples per dataset (default 250, max 250)
-            
-        Returns:
-            dataset_c for cleaning (dataset_u is not returned)
-        """
-        print(f"Loading MMLU-Pro dataset: {dataset_name}, category: {category}")
-        
-        # Check if preprocessed dataset already exists
-        preprocess_dir = os.path.dirname(output_dir) if output_dir.endswith(('cleaned', 'processed')) else output_dir
-        path_c = os.path.join(preprocess_dir, "dataset_c.jsonl")
-        path_u = os.path.join(preprocess_dir, "dataset_u.jsonl")
-        
-        if os.path.exists(path_c) and os.path.exists(path_u):
-            print(f"Found existing preprocessed datasets:")
-            print(f"  - {path_c}")
-            print(f"  - {path_u}")
-            print(f"Skipping data extraction, loading dataset C directly...")
-            
-            dataset_c = []
-            with open(path_c, 'r', encoding='utf-8') as f:
-                for line in f:
-                    if line.strip():
-                        dataset_c.append(json.loads(line))
-            
-            print(f"Loaded {len(dataset_c)} items from dataset C")
-            return dataset_c
-        
-        try:
-            # Loading dataset
-            dataset = load_dataset(dataset_name, split='test')
-            
-            # Filter by specified category
-            filtered_data = []
-            for i, item in enumerate(dataset):
-                if item.get('category') != category:
-                    continue
-                
-                # Get correct answer index and options
-                answer_index = item.get('answer_index', item.get('answer'))
-                options = item.get('options', [])
-                
-                if answer_index is None or not options:
-                    continue
-                
-                # Handle answer index (may be letter A/B/C/D or number 0/1/2/3)
-                if isinstance(answer_index, str):
-                    # Convert letter index to number
-                    answer_idx = ord(answer_index.upper()) - ord('A')
-                else:
-                    answer_idx = int(answer_index)
-                
-                # Validate index
-                if answer_idx < 0 or answer_idx >= len(options):
-                    continue
-                
-                # Get content of the correct option
-                correct_option = options[answer_idx]
-                
-                # Check if the correct answer is at least 50% numeric
-                if not self._is_numerical_text(correct_option, threshold=0.5):
-                    continue
-                
-                # Get question text
-                question_text = item.get('question', '')
-                
-                # Check if the question contains modifiable numeric values
-                if not self._contains_modifiable_numbers(question_text):
-                    continue
-                
-                # Build data item
-                filtered_item = {
-                    "original_index": i,
-                    "question_id": item.get('question_id', str(i)),
-                    "problem": question_text,
-                    "solution": "",  # MMLU datasets typically do not include solution steps
-                    "answer": correct_option,  # Use the content of the correct option directly
-                    "category": category
-                }
-                filtered_data.append(filtered_item)
-        
-        except Exception as e:
-            print(f"Error loading MMLU-Pro dataset: {e}")
-            return []
-        
-        print(f"Total matching items (category='{category}', numerical answer >= 50%, problem contains numbers): {len(filtered_data)}")
-        
-        if len(filtered_data) == 0:
-            print("No matching items found!")
-            return []
-        
-        # Randomly sample two non-overlapping datasets
-        if len(filtered_data) >= sample_size * 2:
-            sampled_items = random.sample(filtered_data, sample_size * 2)
-            dataset_c = sampled_items[:sample_size]
-            dataset_u = sampled_items[sample_size:]
-            print(f"Sampled two disjoint datasets of size {sample_size} each")
-        else:
-            print(f"Not enough items for two disjoint datasets of size {sample_size}. Using available items split in half.")
-            random.shuffle(filtered_data)
-            split_idx = len(filtered_data) // 2
-            dataset_c = filtered_data[:split_idx]
-            dataset_u = filtered_data[split_idx:]
-            print(f"Dataset C: {len(dataset_c)} items, Dataset U: {len(dataset_u)} items")
-        
-        # Sort by original index for consistency
-        dataset_c.sort(key=lambda x: x['original_index'])
-        dataset_u.sort(key=lambda x: x['original_index'])
-        
-        # Save preprocessed dataset to parent directory (not the cleaned subdirectory)
-        # e.g., if output_dir is /path/to/mmlu/business/cleaned
-        # then preprocessed data is saved to /path/to/mmlu/business
-        preprocess_dir = os.path.dirname(output_dir) if output_dir.endswith(('cleaned', 'processed')) else output_dir
-        os.makedirs(preprocess_dir, exist_ok=True)
-        
-        path_c = os.path.join(preprocess_dir, "dataset_c.jsonl")
-        print(f"Saving dataset C to {path_c}")
-        with open(path_c, 'w', encoding='utf-8') as f:
-            for item in dataset_c:
-                item['dataset_subset'] = 'c'
-                f.write(json.dumps(item, ensure_ascii=False) + '\n')
-        
-        path_u = os.path.join(preprocess_dir, "dataset_u.jsonl")
-        print(f"Saving dataset U to {path_u}")
-        with open(path_u, 'w', encoding='utf-8') as f:
-            for item in dataset_u:
-                item['dataset_subset'] = 'u'
-                f.write(json.dumps(item, ensure_ascii=False) + '\n')
-        
-        print(f"Returning combined dataset for processing (Dataset C only will be cleaned)")
-        # Return only dataset_c for subsequent cleaning
-        return dataset_c
-
-    def _prepare_finance_dataset_from_csv(self, csv_path: str, output_dir: str, sample_size: int = 250) -> List[Dict]:
-        """
-        Preprocessing for finance CSV: filter task='calcu' & empty figure, sample TWO disjoint datasets.
-        Each dataset size is capped at 250 (default).
-        """
-        # Check if preprocessed dataset already exists
-        preprocess_dir = os.path.dirname(output_dir) if output_dir.endswith(('cleaned', 'processed')) else output_dir
-        path_c = os.path.join(preprocess_dir, "dataset_c.jsonl")
-        path_u = os.path.join(preprocess_dir, "dataset_u.jsonl")
-        
-        if os.path.exists(path_c) and os.path.exists(path_u):
-            print(f"Found existing preprocessed datasets:")
-            print(f"  - {path_c}")
-            print(f"  - {path_u}")
-            print(f"Skipping data extraction, loading datasets directly...")
-            
-            dataset_c = []
-            dataset_u = []
-            
-            with open(path_c, 'r', encoding='utf-8') as f:
-                for line in f:
-                    if line.strip():
-                        dataset_c.append(json.loads(line))
-            
-            with open(path_u, 'r', encoding='utf-8') as f:
-                for line in f:
-                    if line.strip():
-                        dataset_u.append(json.loads(line))
-            
-            print(f"Loaded {len(dataset_c)} items from dataset C, {len(dataset_u)} items from dataset U")
-            return dataset_c + dataset_u
-        
-        filtered_data = []
-        try:
-            with open(csv_path, 'r', encoding='utf-8') as f:
-                reader = csv.DictReader(f)
-                for i, row in enumerate(reader):
-                    task = row.get('task', '').strip().lower()
-                    figure = row.get('figure', '').strip()
-                    
-                    if task == 'calcu' and not figure:
-                        item = {
-                            "original_index": i,
-                            "id": row.get('id', str(i)),
-                            "problem": row.get('question', ''),
-                            "solution": "",
-                            "answer": row.get('ground_truth', '')
-                        }
-                        filtered_data.append(item)
-        except Exception as e:
-            print(f"Error reading CSV {csv_path}: {e}")
-            return []
-            
-        print(f"Total matching items (task='calcu', figure=''): {len(filtered_data)}")
-        
-        # Sample two non-overlapping datasets
-        if len(filtered_data) >= sample_size * 2:
-            sampled_items = random.sample(filtered_data, sample_size * 2)
-            dataset_c = sampled_items[:sample_size]
-            dataset_u = sampled_items[sample_size:]
-            print(f"Sampled two disjoint datasets of size {sample_size}")
-        else:
-            print(f"Not enough items for two disjoint datasets of size {sample_size}. Using available items split in half.")
-            random.shuffle(filtered_data)
-            split_idx = len(filtered_data) // 2
-            dataset_c = filtered_data[:split_idx]
-            dataset_u = filtered_data[split_idx:]
-            
-        # Sort by original index for consistency
-        dataset_c.sort(key=lambda x: x['original_index'])
-        dataset_u.sort(key=lambda x: x['original_index'])
-        
-        # Save intermediate files to parent directory
-        preprocess_dir = os.path.dirname(output_dir) if output_dir.endswith(('cleaned', 'processed')) else output_dir
-        os.makedirs(preprocess_dir, exist_ok=True)
-        
-        path_c = os.path.join(preprocess_dir, "dataset_c.jsonl")
-        print(f"Saving dataset C to {path_c}")
-        with open(path_c, 'w', encoding='utf-8') as f:
-            for item in dataset_c:
-                item['dataset_subset'] = 'c'
-                f.write(json.dumps(item, ensure_ascii=False) + '\n')
-
-        path_u = os.path.join(preprocess_dir, "dataset_u.jsonl")
-        print(f"Saving dataset U to {path_u}")
-        with open(path_u, 'w', encoding='utf-8') as f:
-            for item in dataset_u:
-                item['dataset_subset'] = 'u'
-                f.write(json.dumps(item, ensure_ascii=False) + '\n')
-                
-        return dataset_c + dataset_u
 
     def paraphrase_dataset(
-        self, 
+        self,
         dataset_path: str,
         mode: str = "paraphrased",
         max_samples: Optional[int] = None,
         save_interval: int = 10,
         index_range: Optional[str] = None,
-        category: Optional[str] = None
     ):
         """
-        Rewrite the entire dataset by modifying numbers and recomputing solutions and answers
-        
+        Rewrite the entire dataset by modifying numbers and recomputing solutions and answers.
+
         Args:
-            dataset_path: path to dataset JSON file or HuggingFace dataset name (for MMLU mode)
-            mode: modification mode — "paraphrased", "original", "both", "clean", "finance", or "mmlu"
-            max_samples: maximum samples to process, None means all
+            dataset_path: path to a local JSONL/JSON dataset file
+            mode: modification mode — "paraphrased", "original", "both", or "clean"
+            max_samples: maximum samples to process; None processes all
             save_interval: how often (in samples) to save progress
-            index_range: specify original_index range, format: "start-end" or "start,end" (e.g. "10-20" or "10,15,20")
-            category: category for MMLU mode (e.g. "math", "physics")
+            index_range: specify original_index range, format "start-end" or "start,end"
+                         (e.g. "10-20" or "10,15,20"), or a path to a failed-indices JSON file
         """
         print(f"Loading dataset: {dataset_path} (mode: {mode})")
-        
-        # Handle MMLU mode
-        if mode == "mmlu":
-            # Check if it is a local JSONL file
-            if os.path.exists(dataset_path) and dataset_path.endswith('.jsonl'):
-                print(f"Detected local JSONL file, loading directly: {dataset_path}")
-                dataset = []
-                with open(dataset_path, 'r', encoding='utf-8') as f:
-                    for line in f:
-                        if line.strip():
-                            dataset.append(json.loads(line))
-                print(f"Loaded {len(dataset)} records")
-            else:
-                # Prepare data from HuggingFace dataset
-                if not category:
-                    print("Error: --category is required when loading MMLU dataset from HuggingFace")
-                    return
-                dataset = self._prepare_mmlu_dataset(dataset_path, category, self.output_dir)
-                if not dataset:
-                    print("Error: Failed to load MMLU dataset or no matching data found")
-                    return
-        # Handle finance mode specially for CSV input
-        elif mode == "finance" and dataset_path.endswith('.csv'):
-            dataset = self._prepare_finance_dataset_from_csv(dataset_path, self.output_dir)
 
-        # Determine which fields to use based on mode
+        # Determine which fields to read based on mode.
+        # `clean` mode accepts either `question` (e.g. omnimath) or `problem` (e.g. multi_domain)
+        # as the input field; the loader below tries them in order.
         if mode == "paraphrased":
             problem_field = "paraphrased_problem"
             solution_field = "paraphrased_solution"
@@ -1449,43 +1066,30 @@ Reasoning: [Brief explanation of your verification]"""
             solution_field = "original_solution"
             answer_field = "original_answer"
         elif mode == "clean":
-            problem_field = "question"
+            problem_field = "question"  # falls back to "problem" if absent
             solution_field = "solution"
             answer_field = "answer"
-        elif mode == "finance":
-            problem_field = "problem"
-            solution_field = "solution"
-            answer_field = "answer"
-            self.system_prompt = getattr(self, "system_prompt_finance", self.system_prompt)
-        elif mode == "mmlu":
-            problem_field = "problem"
-            solution_field = "solution"
-            answer_field = "answer"
-            self.system_prompt = getattr(self, "system_prompt_mmlu", self.system_prompt)
         elif mode == "both":
-            # both mode processes both versions simultaneously
+            # both mode processes the original and paraphrased versions simultaneously
             pass
         else:
-            print(f"Error: Unsupported mode '{mode}'. Use 'paraphrased', 'original', 'both', 'clean', 'finance', or 'mmlu'")
+            print(f"Error: Unsupported mode '{mode}'. Use 'paraphrased', 'original', 'both', or 'clean'")
             return
-        
-        # Avoid reloading if already loaded (e.g. from CSV, MMLU)
-        if 'dataset' not in locals():
-            try:
-                # Auto-detect file format or decide based on mode
-                if mode == "clean" or mode == "finance" or dataset_path.endswith('.jsonl'):
-                    print(f"Loading dataset in JSONL format: {dataset_path}")
-                    dataset = []
-                    with open(dataset_path, 'r', encoding='utf-8') as f:
-                        for line in f:
-                            if line.strip():
-                                dataset.append(json.loads(line))
-                else:
-                    with open(dataset_path, 'r', encoding='utf-8') as f:
-                        dataset = json.load(f)
-            except Exception as e:
-                print(f"Failed to load dataset: {str(e)}")
-                return
+
+        try:
+            print(f"Loading dataset in JSONL format: {dataset_path}")
+            dataset = []
+            if dataset_path.endswith('.jsonl'):
+                with open(dataset_path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        if line.strip():
+                            dataset.append(json.loads(line))
+            else:
+                with open(dataset_path, 'r', encoding='utf-8') as f:
+                    dataset = json.load(f)
+        except Exception as e:
+            print(f"Failed to load dataset: {str(e)}")
+            return
         
         # Ensure all items have original_index
         for i, item in enumerate(dataset):
@@ -1588,10 +1192,16 @@ Reasoning: [Brief explanation of your verification]"""
                     print(f"Index {original_idx} (original_index) modification failed")
                     failed_indices.append(original_idx)
             else:
-                # Single mode: process only one version
-                problem = item[problem_field]
-                solution = item[solution_field]
-                answer = item[answer_field]
+                # Single mode: process only one version.
+                # For 'clean' mode, fall back to `problem` if `question` is missing
+                # (omnimath uses `question`, multi_domain uses `problem`).
+                problem = item.get(problem_field) or item.get("problem")
+                solution = item.get(solution_field, "")
+                answer = item.get(answer_field, "")
+                if not problem:
+                    print(f"Index {original_idx}: missing problem field; skipping")
+                    failed_indices.append(original_idx)
+                    continue
                 
                 result = self.paraphrase_single_item(problem, solution, answer)
                 
@@ -1837,20 +1447,14 @@ def main():
         "--dataset-path",
         type=str,
         required=True,
-        help="Path to the dataset JSON file, local JSONL file, or HuggingFace dataset name (for MMLU mode, e.g. 'TIGER-Lab/MMLU-Pro'). In MMLU mode, if a local JSONL file is given it is loaded directly; otherwise the dataset is downloaded and preprocessed from HuggingFace"
+        help="Path to a local JSON or JSONL dataset file"
     )
     parser.add_argument(
         "--mode",
         type=str,
-        choices=["paraphrased", "original", "both", "clean", "finance", "mmlu"],
+        choices=["paraphrased", "original", "both", "clean"],
         default="paraphrased",
-        help="Modification mode: 'paraphrased' modifies the paraphrased version, 'original' modifies the original version, 'both' modifies both simultaneously using the same number mapping, 'clean' modifies question-answer-solution format data, 'finance' modifies finance data, 'mmlu' processes MMLU-Pro datasets"
-    )
-    parser.add_argument(
-        "--category",
-        type=str,
-        default=None,
-        help="Category to use when downloading data from HuggingFace in MMLU mode (e.g. 'math', 'physics', 'chemistry', 'business'). Not required when loading a local JSONL file directly"
+        help="Modification mode: 'paraphrased' modifies the paraphrased version, 'original' modifies the original version, 'both' modifies both simultaneously with the same number mapping, 'clean' modifies plain question/problem-solution-answer data (auto-falls back to the 'problem' field if 'question' is absent)"
     )
     parser.add_argument(
         "--api-key",
@@ -1953,7 +1557,6 @@ def main():
         max_samples=args.max_samples,
         save_interval=args.save_interval,
         index_range=args.index_range,
-        category=args.category
     )
 
 
