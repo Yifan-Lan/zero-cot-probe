@@ -1,7 +1,6 @@
 <div align="center">
 
-# The Illusion of Reasoning
-### Exposing Evasive Data Contamination in LLMs via Zero-CoT Truncation
+# The Illusion of Reasoning: Exposing Evasive Data Contamination in LLMs via Zero-CoT Truncation
 
 📄 [**Paper**](https://arxiv.org/abs/2605.21856)
 
@@ -42,8 +41,7 @@ ZCP/
 ├── statistical_significance_test.py            # ZCP evaluation — open-weight models (vLLM)
 ├── statistical_significance_test_api_model.py  # ZCP evaluation — closed-source APIs (OpenAI / Gemini / Anthropic)
 │
-├── clean_math_dataset_multi_models.py          # Build reference data D̃_eval — MATH-format
-├── clean_numerical_dataset_multi_models.py     # Build reference data D̃_eval — MMLU-Pro / numerical / finance
+├── clean_numerical_dataset_multi_models.py     # Build reference data D̃_eval — math / MMLU-Pro / numerical / finance (generator + 2-judge consensus)
 ├── paraphrase_general_dataset_multi_version.py # Build evasive contamination D'_eval (--domain selects style)
 │
 ├── math_grade.py                               # Math answer equivalence (sympy + LaTeX)
@@ -62,8 +60,6 @@ conda activate truncate
 Key dependencies: `vllm`, `torch`, `transformers`, `peft`, `scipy`, `statsmodels`, `openai`, `anthropic`, `google-genai`.
 
 ## Quick Start
-
-The Zero-CoT Probe enforces a strict zero-CoT generation setting. For open-weight models it prefixes the model response with `The final answer is: \[ \boxed{`; for closed-source APIs it appends a strict instruction to the user query (paper Section 3.3).
 
 ### 1. ZCP on Open-Weight Models (vLLM)
 
@@ -84,8 +80,8 @@ CUDA_VISIBLE_DEVICES=0 python statistical_significance_test.py \
 |---|---|
 | `--model` | HuggingFace model ID or local path |
 | `--lora-path` | LoRA adapter path (optional, for fine-tuned models) |
-| `--dataset-path-a/b` | Two JSONL files compared by ZCP (typically: paraphrased vs reference) |
-| `--data-type-a/b` | `original`, `paraphrased`, `modified`, or `clean` |
+| `--dataset-path-a/b` | The two JSONL files ZCP compares. Pair `paraphrased` vs `reference` to probe **evasive** data contamination; pair `original` vs `reference` to probe **standard** data contamination. |
+| `--data-type-a/b` | Field prefix used to read each JSONL row. Each value selects a `<prefix>_problem` / `<prefix>_answer` field pair: `original` → `original_problem` / `original_answer`; `paraphrased` → `paraphrased_problem` / `answer`; `modified` → `modified_problem` / `modified_answer`; `clean` → bare `question` / `answer` (no prefix). |
 | `--truncate-ratio` | `0` = Zero-CoT Probe (the ZCP setting); `1` = Full-CoT baseline. Multiple values sweep. |
 | `--max-samples` | Cap on evaluation samples (useful for smoke tests) |
 | `--output-dir` | Results directory |
@@ -116,8 +112,10 @@ The reference data $\tilde{D}_{\text{eval}}$ is built via the **generator + 2-ju
 
 ```bash
 # Reference data D̃_eval (isomorphic numerical perturbation):
-python clean_math_dataset_multi_models.py \
+# --mode {clean, paraphrased, original, both, mmlu, finance} selects the input/output schema.
+python clean_numerical_dataset_multi_models.py \
     --dataset-path <path/to/original_dataset.jsonl> \
+    --mode clean \
     --output-dir runs/reference_data \
     --api-key $OPENAI_API_KEY \
     --gemini-api-key $GEMINI_API_KEY
@@ -162,6 +160,8 @@ The resulting $p$-values are calibrated into the Bayesian Contamination Confiden
 | `multi_domain_dataset/dataset_c/dataset_c.jsonl` | 1,325 | Multi-domain Dataset C (MMLU-Pro + XFinBench) |
 | `multi_domain_dataset/dataset_c/paraphrased_dataset_c.jsonl` | 7,950 | 6× paraphrased Multi-domain Dataset C |
 | `multi_domain_dataset/dataset_u/dataset_u.jsonl` | 1,325 | Multi-domain Dataset U |
+
+> **Note on reference data ($\tilde{D}_{\text{eval}}$).** We intentionally **do not** release the isomorphically perturbed reference data, in order to keep it strictly clean and uncontaminated for future contamination-detection studies. We encourage users to build their own reference data with `clean_numerical_dataset_multi_models.py` (the generator + 2-judge consensus pipeline from paper Appendix B; small per-sample API cost). If you genuinely need our exact reference splits for direct comparison, please contact the authors.
 
 Fine-tuning code is intentionally not included — please follow the SFT + GRPO recipe in paper Appendix E.
 

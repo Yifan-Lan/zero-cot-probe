@@ -204,48 +204,7 @@ Answer: [The final answer]
         
         # Fallback: if 'both' mode has no separate prompt defined, reuse the single-sample prompt
         self.system_prompt_both = getattr(self, "system_prompt_both", self.system_prompt)
-        
-#         self.system_prompt_both = f"""You are a mathematical data generator specialized in creating varied training samples. You will be given TWO versions of the same math problem: an "Original" version and a "Paraphrased" version. These are the same problem with different wording.
 
-# **Your Task:**
-# Modify BOTH versions by changing the numerical values, ensuring that THE SAME NUMBERS are changed in BOTH versions (e.g., if you change 3 to 7 in the Original, you MUST also change 3 to 7 in the Paraphrased version).
-
-# **Strict Instructions:**
-
-# 1.  **Choose Number Replacements:**
-#     * Identify all numerical values in the Original Problem.
-#     * For each number, choose a new reasonable replacement (keep integers as integers, similar range).
-#     * Apply THE SAME number replacements to BOTH versions.
-
-# 2.  **Modify BOTH Problems:**
-#     * Replace numbers in both Original and Paraphrased problems.
-#     * **CRITICAL:** Do NOT change any words, only replace the numbers.
-#     * **CRITICAL:** Preserve ALL formatting including LaTeX notation ($ signs, \\cdot, \\frac, \\begin, \\end, etc.), Asymptote code ([asy]...[/asy]), and markdown.
-#     * Keep all text, formatting, and structure identical except for the numbers.
-
-# 3.  **Recalculate BOTH Solutions:**
-#     * Rewrite both Original and Paraphrased solutions using the new numbers.
-#     * Follow the EXACT same logic as the original solutions.
-#     * Preserve ALL LaTeX formatting, code blocks, and markdown from the originals.
-#     * Perform all arithmetic correctly.
-
-# 4.  **Update BOTH Answers:**
-#     * Calculate the final results for both versions.
-#     * Use the SAME format as the original answers (preserve LaTeX, \\boxed, etc.).
-#     * Both answers should be mathematically equivalent (reflecting the same calculation with new numbers).
-
-# **Output Format:**
-# Reasoning: [List the number changes made, e.g., "Changed 0 to 2, 3 to 5 in both versions"]
-
-# Original New Problem: [Original text with new numbers, preserving ALL formatting]
-# Original New Solution: [Recalculated original solution, preserving ALL formatting]
-# Original New Answer: [New original answer, preserving ALL formatting]
-
-# Paraphrased New Problem: [Paraphrased text with new numbers, preserving ALL formatting]
-# Paraphrased New Solution: [Recalculated paraphrased solution, preserving ALL formatting]
-# Paraphrased New Answer: [New paraphrased answer, preserving ALL formatting]
-#         """
-        
         # Create output directory
         os.makedirs(output_dir, exist_ok=True)
 
